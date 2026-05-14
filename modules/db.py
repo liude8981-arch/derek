@@ -28,11 +28,14 @@ def _is_postgres() -> bool:
 def get_connection():
     if _is_postgres():
         import psycopg2
+        url = st.secrets["supabase_url"]
+        if "sslmode" not in url:
+            url += "?sslmode=require"
         try:
-            return psycopg2.connect(st.secrets["supabase_url"])
+            return psycopg2.connect(url)
         except Exception as e:
             if _HAS_ST:
-                st.error(f"❌ Supabase 連線失敗，請確認 Secrets 中的 supabase_url 是否正確。\n\n錯誤：{e}")
+                st.error(f"❌ Supabase 連線失敗：{e}")
             raise
     else:
         _DB_PATH.parent.mkdir(exist_ok=True)
