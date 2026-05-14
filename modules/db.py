@@ -28,11 +28,20 @@ def _is_postgres() -> bool:
 def get_connection():
     if _is_postgres():
         import psycopg2
+        import urllib.parse
         url = st.secrets["supabase_url"]
-        if "sslmode" not in url:
-            url += "?sslmode=require"
         try:
-            return psycopg2.connect(url)
+            r = urllib.parse.urlparse(url)
+            conn = psycopg2.connect(
+                host=r.hostname,
+                port=r.port or 5432,
+                dbname=r.path.lstrip("/"),
+                user=r.username,
+                password=urllib.parse.unquote(r.password or ""),
+                sslmode="require",
+                connect_timeout=10,
+            )
+            return conn
         except Exception as e:
             if _HAS_ST:
                 st.error(f"❌ Supabase 連線失敗：{e}")
