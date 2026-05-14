@@ -73,7 +73,7 @@ if page == "Dashboard":
         display_cols = ["Ticker", "Price", "Day %", "Week %", "Month %", "MA20", "MA60", "Trend"]
         tbl = cat_df[display_cols].set_index("Ticker")
 
-        styled = tbl.style.applymap(style_pct, subset=["Day %", "Week %", "Month %"]).format(
+        styled = tbl.style.map(style_pct, subset=["Day %", "Week %", "Month %"]).format(
             {
                 "Price":   "{:.4f}",
                 "Day %":   "{:+.2f}%",
