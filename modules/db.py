@@ -1,9 +1,10 @@
 """
 Database layer.
-- Cloud (Streamlit Secrets 有 SUPABASE_URL): 用 supabase-py (HTTPS REST API)
-- Local (無 Secrets): 用 SQLite
+- Cloud: Supabase REST API (純 HTTPS，不需要 psycopg2 或 supabase-py)
+- Local: SQLite
 """
 import sqlite3
+import requests
 from pathlib import Path
 
 _DB_PATH = Path(__file__).parent.parent / "data" / "market_research.db"
@@ -15,22 +16,38 @@ except ImportError:
     _HAS_ST = False
 
 
+def _cfg():
+    try:
+        url = st.secrets.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = st.secrets.get("SUPABASE_KEY", "").strip()
+        return url, key
+    except Exception:
+        return "", ""
+
+
 def _is_supabase() -> bool:
     if not _HAS_ST:
         return False
-    try:
-        return "SUPABASE_URL" in st.secrets
-    except Exception:
-        return False
+    url, key = _cfg()
+    return bool(url and key)
 
 
-@st.cache_resource
-def _get_client():
-    from supabase import create_client
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+def _headers():
+    _, key = _cfg()
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
 
-# ── SQLite helpers (local only) ──────────────────────────────────────────────
+def _base():
+    url, _ = _cfg()
+    return f"{url}/rest/v1"
+
+
+# ── SQLite (local) ───────────────────────────────────────────────────────────
 
 def _sqlite_conn():
     _DB_PATH.parent.mkdir(exist_ok=True)
@@ -39,8 +56,7 @@ def _sqlite_conn():
 
 def _sqlite_init():
     con = _sqlite_conn()
-    cur = con.cursor()
-    cur.executescript("""
+    con.executescript("""
         CREATE TABLE IF NOT EXISTS weekly_journal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             week_start TEXT, headlines TEXT, main_theme TEXT,
@@ -58,13 +74,14 @@ def _sqlite_init():
         CREATE TABLE IF NOT EXISTS earnings_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT, report_date TEXT, revenue_growth TEXT,
-            eps_beat TEXT, guidance TEXT, price_reaction REAL, interpretation TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
+            eps_beat TEXT, guidance TEXT, price_reaction REAL,
+            interpretation TEXT, created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS trade_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT, ticker TEXT, direction TEXT, reason TEXT,
-            regime TEXT, risk TEXT, stop_loss TEXT, result TEXT, review TEXT,
+            regime TEXT, risk TEXT, stop_loss TEXT,
+            result TEXT, review TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
@@ -76,11 +93,12 @@ def _sqlite_init():
 
 def db_select(table: str, order_col: str | None = None) -> list[dict]:
     if _is_supabase():
-        client = _get_client()
-        q = client.table(table).select("*")
+        params = {"select": "*"}
         if order_col:
-            q = q.order(order_col, desc=True)
-        return q.execute().data or []
+            params["order"] = f"{order_col}.desc"
+        r = requests.get(f"{_base()}/{table}", headers=_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
     else:
         _sqlite_init()
         con = _sqlite_conn()
@@ -99,7 +117,8 @@ def db_select(table: str, order_col: str | None = None) -> list[dict]:
 
 def db_insert(table: str, data: dict):
     if _is_supabase():
-        _get_client().table(table).insert(data).execute()
+        r = requests.post(f"{_base()}/{table}", headers=_headers(), json=data, timeout=10)
+        r.raise_for_status()
     else:
         _sqlite_init()
         con = _sqlite_conn()
@@ -112,7 +131,13 @@ def db_insert(table: str, data: dict):
 
 def db_delete(table: str, row_id: int):
     if _is_supabase():
-        _get_client().table(table).delete().eq("id", row_id).execute()
+        r = requests.delete(
+            f"{_base()}/{table}",
+            headers=_headers(),
+            params={"id": f"eq.{row_id}"},
+            timeout=10,
+        )
+        r.raise_for_status()
     else:
         _sqlite_init()
         con = _sqlite_conn()
