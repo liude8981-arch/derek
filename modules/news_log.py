@@ -2,7 +2,9 @@ import pandas as pd
 from modules.db import db_select, db_insert, db_delete
 
 TABLE = "news_log"
-CATEGORIES = ["Fed", "Inflation", "Yield", "Oil", "Earnings", "Geopolitical", "Other"]
+
+CATEGORIES = ["Fed", "Inflation", "Yield", "Earnings", "Oil", "Geopolitical", "Other"]
+IMPORTANCE  = ["High", "Medium", "Low"]
 
 
 def save_news(data: dict):
