@@ -1,24 +1,17 @@
 import pandas as pd
-from modules.db import execute, init_tables, placeholder, _is_postgres
+from modules.db import db_select, db_insert, db_delete
 
+TABLE = "news_log"
 CATEGORIES = ["Fed", "Inflation", "Yield", "Oil", "Earnings", "Geopolitical", "Other"]
 
 
 def save_news(data: dict):
-    init_tables()
-    is_pg = _is_postgres()
-    cols = list(data)
-    ph = placeholder(len(cols), is_pg)
-    sql = f"INSERT INTO news_log ({','.join(cols)}) VALUES ({ph})"
-    execute(sql, list(data.values()))
+    db_insert(TABLE, data)
 
 
 def load_news() -> pd.DataFrame:
-    init_tables()
-    rows = execute("SELECT * FROM news_log ORDER BY date DESC", fetch=True)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(db_select(TABLE, order_col="date"))
 
 
 def delete_news(row_id: int):
-    execute("DELETE FROM news_log WHERE id=%s" if _is_postgres() else "DELETE FROM news_log WHERE id=?",
-            (row_id,))
+    db_delete(TABLE, row_id)

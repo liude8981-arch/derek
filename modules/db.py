@@ -1,11 +1,12 @@
 """
-Database connection abstraction.
-- Local: SQLite (data/market_research.db)
-- Cloud: Supabase PostgreSQL via st.secrets["supabase_url"]
+Database layer.
+- Cloud (Streamlit Secrets 有 SUPABASE_URL): 用 supabase-py (HTTPS REST API)
+- Local (無 Secrets): 用 SQLite
 """
 import sqlite3
-import os
 from pathlib import Path
+
+_DB_PATH = Path(__file__).parent.parent / "data" / "market_research.db"
 
 try:
     import streamlit as st
@@ -13,145 +14,108 @@ try:
 except ImportError:
     _HAS_ST = False
 
-_DB_PATH = Path(__file__).parent.parent / "data" / "market_research.db"
 
-
-def _is_postgres() -> bool:
+def _is_supabase() -> bool:
     if not _HAS_ST:
         return False
     try:
-        return "supabase_url" in st.secrets
+        return "SUPABASE_URL" in st.secrets
     except Exception:
         return False
 
 
-def get_connection():
-    if _is_postgres():
-        import psycopg2
-        import urllib.parse
-        url = st.secrets["supabase_url"]
-        try:
-            r = urllib.parse.urlparse(url)
-            conn = psycopg2.connect(
-                host=r.hostname,
-                port=r.port or 5432,
-                dbname=r.path.lstrip("/"),
-                user=r.username,
-                password=urllib.parse.unquote(r.password or ""),
-                sslmode="require",
-                connect_timeout=10,
-            )
-            return conn
-        except Exception as e:
-            if _HAS_ST:
-                st.error(f"❌ Supabase 連線失敗：{e}")
-            raise
+@st.cache_resource
+def _get_client():
+    from supabase import create_client
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+# ── SQLite helpers (local only) ──────────────────────────────────────────────
+
+def _sqlite_conn():
+    _DB_PATH.parent.mkdir(exist_ok=True)
+    return sqlite3.connect(_DB_PATH)
+
+
+def _sqlite_init():
+    con = _sqlite_conn()
+    cur = con.cursor()
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS weekly_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            week_start TEXT, headlines TEXT, main_theme TEXT,
+            equity TEXT, rates TEXT, commodity TEXT, currency TEXT,
+            volatility TEXT, crypto TEXT, strongest TEXT, weakest TEXT,
+            regime TEXT, next_watch TEXT, summary TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS news_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT, category TEXT, title TEXT, interpretation TEXT,
+            affected_assets TEXT, market_reaction TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS earnings_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT, report_date TEXT, revenue_growth TEXT,
+            eps_beat TEXT, guidance TEXT, price_reaction REAL, interpretation TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS trade_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT, ticker TEXT, direction TEXT, reason TEXT,
+            regime TEXT, risk TEXT, stop_loss TEXT, result TEXT, review TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    con.commit()
+    con.close()
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def db_select(table: str, order_col: str | None = None) -> list[dict]:
+    if _is_supabase():
+        client = _get_client()
+        q = client.table(table).select("*")
+        if order_col:
+            q = q.order(order_col, desc=True)
+        return q.execute().data or []
     else:
-        _DB_PATH.parent.mkdir(exist_ok=True)
-        return sqlite3.connect(_DB_PATH)
-
-
-def placeholder(n: int, is_pg: bool) -> str:
-    if is_pg:
-        return ",".join(f"%s" for _ in range(n))
-    return ",".join("?" for _ in range(n))
-
-
-def execute(sql: str, params=(), fetch=False):
-    """Run a single statement, optionally returning rows as list-of-dicts."""
-    is_pg = _is_postgres()
-    con = get_connection()
-    try:
-        cur = con.cursor()
-        cur.execute(sql, params)
-        if fetch:
+        _sqlite_init()
+        con = _sqlite_conn()
+        try:
+            sql = f"SELECT * FROM {table}"
+            if order_col:
+                sql += f" ORDER BY {order_col} DESC"
+            cur = con.execute(sql)
             cols = [d[0] for d in cur.description]
-            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-            return rows
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except Exception:
+            return []
+        finally:
+            con.close()
+
+
+def db_insert(table: str, data: dict):
+    if _is_supabase():
+        _get_client().table(table).insert(data).execute()
+    else:
+        _sqlite_init()
+        con = _sqlite_conn()
+        cols = list(data)
+        ph = ",".join("?" for _ in cols)
+        con.execute(f"INSERT INTO {table} ({','.join(cols)}) VALUES ({ph})", list(data.values()))
         con.commit()
-    finally:
         con.close()
-    return []
 
 
-def executemany_insert(table: str, cols: list[str], rows: list[list]):
-    is_pg = _is_postgres()
-    ph = placeholder(len(cols), is_pg)
-    sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({ph})"
-    con = get_connection()
-    try:
-        cur = con.cursor()
-        cur.executemany(sql, rows)
+def db_delete(table: str, row_id: int):
+    if _is_supabase():
+        _get_client().table(table).delete().eq("id", row_id).execute()
+    else:
+        _sqlite_init()
+        con = _sqlite_conn()
+        con.execute(f"DELETE FROM {table} WHERE id=?", (row_id,))
         con.commit()
-    finally:
-        con.close()
-
-
-def init_tables():
-    """Create all tables if they don't exist (works for both SQLite & PG)."""
-    is_pg = _is_postgres()
-    auto_pk = "SERIAL PRIMARY KEY" if is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    ts_default = "DEFAULT NOW()" if is_pg else "DEFAULT (datetime('now'))"
-
-    ddls = [
-        f"""CREATE TABLE IF NOT EXISTS weekly_journal (
-            id          {auto_pk},
-            week_start  TEXT,
-            headlines   TEXT,
-            main_theme  TEXT,
-            equity      TEXT,
-            rates       TEXT,
-            commodity   TEXT,
-            currency    TEXT,
-            volatility  TEXT,
-            crypto      TEXT,
-            strongest   TEXT,
-            weakest     TEXT,
-            regime      TEXT,
-            next_watch  TEXT,
-            summary     TEXT,
-            created_at  TEXT {ts_default}
-        )""",
-        f"""CREATE TABLE IF NOT EXISTS news_log (
-            id              {auto_pk},
-            date            TEXT,
-            category        TEXT,
-            title           TEXT,
-            interpretation  TEXT,
-            affected_assets TEXT,
-            market_reaction TEXT,
-            created_at      TEXT {ts_default}
-        )""",
-        f"""CREATE TABLE IF NOT EXISTS earnings_log (
-            id               {auto_pk},
-            ticker           TEXT,
-            report_date      TEXT,
-            revenue_growth   TEXT,
-            eps_beat         TEXT,
-            guidance         TEXT,
-            price_reaction   REAL,
-            interpretation   TEXT,
-            created_at       TEXT {ts_default}
-        )""",
-        f"""CREATE TABLE IF NOT EXISTS trade_log (
-            id          {auto_pk},
-            date        TEXT,
-            ticker      TEXT,
-            direction   TEXT,
-            reason      TEXT,
-            regime      TEXT,
-            risk        TEXT,
-            stop_loss   TEXT,
-            result      TEXT,
-            review      TEXT,
-            created_at  TEXT {ts_default}
-        )""",
-    ]
-    con = get_connection()
-    try:
-        cur = con.cursor()
-        for ddl in ddls:
-            cur.execute(ddl)
-        con.commit()
-    finally:
         con.close()
